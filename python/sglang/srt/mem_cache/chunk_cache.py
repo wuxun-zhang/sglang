@@ -35,6 +35,8 @@ class ChunkCache(BasePrefixCache):
         return [], None
 
     def cache_finished_req(self, req: Req):
+        # Wuxun: free request related KV cache in req_to_token_pool and
+        # token_to_kv_pool
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(req.origin_input_ids) + len(req.output_ids) - 1
         ]

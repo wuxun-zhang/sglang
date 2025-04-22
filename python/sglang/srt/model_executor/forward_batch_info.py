@@ -52,8 +52,8 @@ if TYPE_CHECKING:
 
 
 class ForwardMode(IntEnum):
-    # Extend a sequence. The KV cache of the beginning part of the sequence is already computed (e.g., system prompt).
     # It is also called "prefill" in common terminology.
+    # Extend a sequence. The KV cache of the beginning part of the sequence is already computed (e.g., system prompt).
     EXTEND = auto()
     # Decode one token.
     DECODE = auto()

@@ -648,6 +648,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # Batch configs
     model_config: ModelConfig = None
     forward_mode: ForwardMode = None
+
+    # Wuxun: overlap between last batch's output processing and cur batch's
+    # forward computation
     enable_overlap: bool = False
     # Tell whether the current running batch is full so that we can skip
     # the check of whether to prefill new requests.
@@ -659,12 +662,14 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     next_batch_sampling_info: SamplingBatchInfo = None
 
     # Batched arguments to model runner
+    # Wuxun: each req has one input id? token id?
     input_ids: torch.Tensor = None  # shape: [b], int64
     input_embeds: torch.Tensor = None  # shape: [b, hidden_size], float32
     req_pool_indices: torch.Tensor = None  # shape: [b], int64
     seq_lens: torch.Tensor = None  # shape: [b], int64
     # The output locations of the KV cache
     out_cache_loc: torch.Tensor = None  # shape: [b], int64
+    # Wuxun: output token id? only one?
     output_ids: torch.Tensor = None  # shape: [b], int64
 
     # The sum of all sequence lengths
@@ -755,6 +760,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         return len(self.reqs) == 0
 
     def alloc_req_slots(self, num_reqs: int):
+        # Wuxun: alloc req_to_token_pool for all seqs in current ScheduleBatch
         req_pool_indices = self.req_to_token_pool.alloc(num_reqs)
         if req_pool_indices is None:
             raise RuntimeError(
@@ -947,7 +953,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Init tensors
         reqs = self.reqs
+        # Wuxun: list of input prefill token ids (for all reqs)
         input_ids = [r.fill_ids[len(r.prefix_indices) :] for r in reqs]
+        # Wuxun: extend_num_tokens is sum of all prefill tokens in current batch
         extend_num_tokens = sum(len(ids) for ids in input_ids)
         seq_lens = [len(r.fill_ids) for r in reqs]
         prefix_lens = [len(r.prefix_indices) for r in reqs]
@@ -1343,6 +1351,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         keep_indices: Optional[List[int]] = None,
     ):
         if keep_indices is None:
+            # Wuxun: keep unfinished requests and non-chunked reqs
             keep_indices = [
                 i
                 for i in range(len(self.reqs))

@@ -117,6 +117,7 @@ class TpModelWorkerClient:
 
     @DynamicGradMode()
     def forward_thread_func_(self):
+        # Wuxun: background thread to run mdoel forward
         batch_pt = 0
         batch_lists = [None] * 2
 
@@ -169,6 +170,8 @@ class TpModelWorkerClient:
             self.output_queue.put((copy_done, logits_output, next_token_ids))
 
     def resolve_batch_result(self, bid: int):
+        # Wuxun: get real token ids here, this will sync GPU execution with
+        # cpu processing
         copy_done, logits_output, next_token_ids = self.output_queue.get()
         copy_done.synchronize()
         self.launch_done.wait()
@@ -202,6 +205,9 @@ class TpModelWorkerClient:
 
         # Allocate output future objects
         bs = len(model_worker_batch.seq_lens)
+        # Wuxun: allocate future token id to allow next process. This future
+        # token ids will be updated when real forward computation finished in
+        # forward_thread_func_
         future_next_token_ids = torch.arange(
             -(self.future_token_ids_ct + 1),
             -(self.future_token_ids_ct + 1 + bs),

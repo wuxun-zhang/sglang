@@ -71,6 +71,7 @@ class TpModelWorker:
             dtype=server_args.dtype,
             quantization=server_args.quantization,
         )
+        # Wuxun: create model runner for each tp worker
         self.model_runner = ModelRunner(
             model_config=self.model_config,
             mem_fraction_static=server_args.mem_fraction_static,
@@ -176,6 +177,7 @@ class TpModelWorker:
         if launch_done:
             launch_done.set()
 
+        # Wuxun: skip sample here 
         if skip_sample:
             next_token_ids = None
         else:

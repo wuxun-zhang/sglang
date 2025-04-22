@@ -191,6 +191,7 @@ class SchedulerOutputProcessorMixin:
             next_token_logprobs = logits_output.next_token_logprobs
         elif batch.spec_algorithm.is_none():
             # spec decoding handles output logprobs inside verify process.
+            # Wuxun: tolist triggers CPU/GPU sync
             next_token_ids = next_token_ids.tolist()
             if batch.return_logprob:
                 next_token_logprobs = logits_output.next_token_logprobs.tolist()

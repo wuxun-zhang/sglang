@@ -246,6 +246,7 @@ class Scheduler(
         else:
             TpWorkerClass = TpModelWorker
 
+        # Wuxun: init TP worker here
         self.tp_worker = TpWorkerClass(
             server_args=server_args,
             gpu_id=gpu_id,
@@ -302,8 +303,10 @@ class Scheduler(
         self.init_memory_pool_and_cache()
 
         # Init running status
+        # Wuxun: waiting_queue is for prefill or chunked prefill reqs
         self.waiting_queue: List[Req] = []
         # The running decoding batch for continuous batching
+        # Wuxun: running_batch is used for decode reqs
         self.running_batch: ScheduleBatch = ScheduleBatch(reqs=[], batch_is_full=False)
         # The current forward batch
         self.cur_batch: Optional[ScheduleBatch] = None
@@ -384,6 +387,10 @@ class Scheduler(
 
         # Init metrics stats
         self.init_metrics()
+
+        # Wuxun: based on different type of inputs, dispatch to different
+        # request handler func, for typical TokenizedGenerateReqInput it will
+        # route to handle_generate_request()
 
         # Init request dispatcher
         self._request_dispatcher = TypeBasedDispatcher(
@@ -483,6 +490,8 @@ class Scheduler(
                     disable=server_args.disable_radix_cache,
                 )
 
+        # Wuxun: need more buffer if spec decode or multiple-step spec decode is
+        # enabled. For single step, it will generate multiple draft tokens
         self.decode_mem_cache_buf_multiplier = (
             1
             if self.spec_algorithm.is_none()
@@ -609,6 +618,10 @@ class Scheduler(
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue = deque()
 
+        # Wuxun: overlapping between last batch's output processing and cur
+        # cur batch's forward computation. Using queue to process batch output
+        # in FCFS manner.
+
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -636,6 +649,8 @@ class Scheduler(
                 tmp_batch.next_batch_sampling_info = (
                     self.tp_worker.cur_sampling_info if batch else None
                 )
+                # Wuxun: last batch's cpu processing overlapped with cur batch's
+                # GPU computation
                 self.process_batch_result(tmp_batch, tmp_result)
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
@@ -730,6 +745,7 @@ class Scheduler(
             recv_reqs = None
 
         if self.server_args.enable_dp_attention:
+            # Wuxun: recv req in local TP rank 0 within different DP groups
             if self.attn_tp_rank == 0:
                 work_reqs = [
                     req
@@ -751,6 +767,8 @@ class Scheduler(
 
             if self.attn_tp_size != 1:
                 attn_tp_rank_0 = self.dp_rank * self.attn_tp_size
+                # Wuxun: broadcast from local tp rank 0 to other ranks within
+                # same DP group
                 work_reqs = broadcast_pyobj(
                     work_reqs,
                     self.attn_tp_rank,
@@ -812,6 +830,8 @@ class Scheduler(
                 )
                 custom_logit_processor = None
 
+            # Wuxun: Req for model forwarding and output return
+
             req = Req(
                 recv_req.rid,
                 recv_req.input_text,
@@ -836,6 +856,7 @@ class Scheduler(
                 req.finished_reason = FINISH_ABORT(
                     f"Invalid request: session id {recv_req.session_params.id} does not exist"
                 )
+                # Wuxun: add request into waiting queue
                 self._add_request_to_queue(req)
                 return
         else:
@@ -1149,10 +1170,13 @@ class Scheduler(
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         # Merge the prefill batch into the running batch
+        # Wuxun: last batch is prefill
         if self.last_batch and self.last_batch.forward_mode.is_extend():
+            # Wuxun: prefill is not finished due to chunked prefill
             if self.chunked_req:
                 # Move the chunked request out of the batch so that we can merge
                 # only finished requests to running_batch.
+                # Wuxun: add finished prefill requests to the running batch
                 self.last_batch.filter_batch(chunked_req_to_exclude=self.chunked_req)
                 self.tree_cache.cache_unfinished_req(self.chunked_req)
                 # chunked request keeps its rid but will get a new req_pool_idx
@@ -1161,6 +1185,8 @@ class Scheduler(
 
             # Filter batch
             last_bs = self.last_batch.batch_size()
+            # Wuxun: filter out the requests that are not finished, so after this
+            # last batch will only contain decode reqs
             self.last_batch.filter_batch()
             if self.last_batch.batch_size() < last_bs:
                 self.running_batch.batch_is_full = False
@@ -1170,10 +1196,11 @@ class Scheduler(
                 if self.running_batch.is_empty():
                     self.running_batch = self.last_batch
                 else:
-                    # Merge running_batch with prefill batch
+                    # Merge running_batch with prefill batch (no chunked req)
                     self.running_batch.merge_batch(self.last_batch)
 
         new_batch = self.get_new_batch_prefill()
+        # Wuxun: there is prefill or chunked prefill req in new batch
         if new_batch is not None:
             # Run prefill first if possible
             ret = new_batch
@@ -1197,6 +1224,7 @@ class Scheduler(
             self.move_ready_grammar_requests()
 
         # Handle the cases where prefill is not allowed
+        # Wuxun: do not schedule prefill if running batch is full (all decode reqs)
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
@@ -1228,6 +1256,7 @@ class Scheduler(
 
         if self.chunked_req is not None:
             self.chunked_req.init_next_round_input()
+            # Wuxun: add chunked request to the running batch
             self.chunked_req = adder.add_chunked_req(self.chunked_req)
 
         if self.lora_paths:
@@ -1256,6 +1285,7 @@ class Scheduler(
                 self.enable_hierarchical_cache,
             )
 
+            # Wuxun: add a new prefill req from waiting queue to running batch
             res = adder.add_one_req(
                 req, self.chunked_req, self.enable_hierarchical_cache
             )

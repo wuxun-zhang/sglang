@@ -54,7 +54,7 @@ std::vector<at::Tensor> mha_fwd(
         v_new_,  // (b, s_k_new, h_k, dv) or (total_k_new, h_k, dv) if there is cu_seqlens_k_new
     std::optional<const at::Tensor>& q_v_,           // (b, s_q, h, dv) or (total_q_new, h, dv) if there is cu_seqlens_q
     std::optional<at::Tensor>& out_,                 // (b, s_q, h, dv) or (total_q, h, dv) if there is cu_seqlens_q
-    std::optional<const at::Tensor>& cu_seqlens_q_,  // b+1
+    std::optional<const at::Tensor>& cu_seqlens_q_,  // b+1, cumulative sequence lengths of q
     std::optional<const at::Tensor>& cu_seqlens_k_,  // b+1
     std::optional<const at::Tensor>& cu_seqlens_k_new_,  // b+1
     std::optional<const at::Tensor>&

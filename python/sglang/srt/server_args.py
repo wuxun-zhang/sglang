@@ -76,6 +76,11 @@ class ServerArgs:
     schedule_policy: str = "fcfs"
     schedule_conservativeness: float = 1.0
     cpu_offload_gb: int = 0
+
+    # Wuxun: default to support page size 1 (token level) attention. This may
+    # have more advantage on reusing KV cache of prefix tokens (more flexible)
+    # compared with paged attention in vllm. The cpu overhead of maintaining 
+    # page table is fully overlapped with GPU computation.
     page_size: int = 1
 
     # Other runtime options

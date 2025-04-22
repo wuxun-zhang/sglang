@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 GB = 1024 * 1024 * 1024
 
+# Wuxun: like vllm's block_tables, this pool maintains token ids belonged to
+# requests
 
 class ReqToTokenPool:
     """A memory pool that maps a request to its token locations."""
@@ -213,7 +215,9 @@ class MHATokenToKVPool(KVCache):
         device: str,
         enable_memory_saver: bool,
     ):
+        # Wuxun: number of tokens (prefix + max generated tokens)
         self.size = size
+        # Wuxun: support different page/block size
         self.page_size = page_size
         self.dtype = dtype
         self.device = device
@@ -229,6 +233,8 @@ class MHATokenToKVPool(KVCache):
         self.head_num = head_num
         self.head_dim = head_dim
         self.layer_num = layer_num
+
+        # Wuxun: create KV cache for layers
         self._create_buffers()
 
         self.layer_transfer_counter = None

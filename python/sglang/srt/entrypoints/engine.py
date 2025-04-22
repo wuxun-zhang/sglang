@@ -481,6 +481,7 @@ def _launch_subprocesses(
             tp_size_per_node * server_args.node_rank,
             tp_size_per_node * (server_args.node_rank + 1),
         )
+        # Wuxun: create scheduler subprocess for each TP rank
         for tp_rank in tp_rank_range:
             reader, writer = mp.Pipe(duplex=False)
             gpu_id = (
@@ -506,6 +507,8 @@ def _launch_subprocesses(
         proc.start()
         scheduler_procs.append(proc)
 
+    # Wuxun: only driver node (rank0) needs to run tokenizer and detokenizer and
+    # then send to other ranks via scheduler pipe writer/reader
     if server_args.node_rank >= 1:
         # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
         # so they can just wait here.
@@ -566,6 +569,7 @@ def _launch_subprocesses(
             )
         scheduler_infos.append(data)
 
+    # Wuxun: sync all scheduler subprocess to have same information
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]

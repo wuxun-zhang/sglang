@@ -393,6 +393,7 @@ class ModelRunner:
 
         # Load the model
         # Remove monkey_patch when linear.py quant remove dependencies with vllm
+        # Wuxun: still use vllm infra for model related initialization
         monkey_patch_vllm_parallel_state()
         monkey_patch_isinstance_for_vllm_base_layer()
 
@@ -436,6 +437,7 @@ class ModelRunner:
         )
         self.dtype = self.model_config.dtype
 
+        # Wuxun: get free memory after model weights loading
         after_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         logger.info(
             f"Load weight end. "
@@ -695,6 +697,7 @@ class ModelRunner:
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
             )
 
+        # Wuxun: get KV cache size limit allocated for max num tokens
         self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
 
         if max_num_reqs is None:

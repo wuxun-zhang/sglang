@@ -333,7 +333,7 @@ class TokenizerManager:
             self.bootstrap_server = KVBootstrapServer(
                 self.server_args.disaggregation_bootstrap_port
             )
-
+ 
     async def generate_request(
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
@@ -396,6 +396,7 @@ class TokenizerManager:
                     "accept text prompts. Please provide input_ids or re-initialize "
                     "the engine with skip_tokenizer_init=False."
                 )
+            # Wuxun: tokenization happens here
             input_ids = self.tokenizer.encode(input_text)
 
         image_inputs: Dict = await self.mm_processor.process_mm_data_async(
@@ -476,6 +477,7 @@ class TokenizerManager:
         created_time: Optional[float] = None,
     ):
         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
+        # Wuxun: request id to state
         self.rid_to_state[obj.rid] = state
         self.send_to_scheduler.send_pyobj(tokenized_obj)
 
@@ -489,6 +491,7 @@ class TokenizerManager:
 
         while True:
             try:
+                # Wuxun: wait for req sent to scheduler
                 await asyncio.wait_for(state.event.wait(), timeout=4)
             except asyncio.TimeoutError:
                 if request is not None and await request.is_disconnected():
@@ -502,6 +505,7 @@ class TokenizerManager:
             out = state.out_list[-1]
 
             state.out_list = []
+            # Wuxun: here to check finished req generation
             if state.finished:
                 if self.log_requests:
                     max_length, skip_names, out_skip_names = self.log_request_metadata
@@ -565,6 +569,7 @@ class TokenizerManager:
 
             # Tokenize all requests
             objs = [obj[i] for i in range(batch_size)]
+            # Wuxun: concurrently to tokenzie all reqs
             tokenized_objs = await asyncio.gather(
                 *(self._tokenize_one_request(obj) for obj in objs)
             )

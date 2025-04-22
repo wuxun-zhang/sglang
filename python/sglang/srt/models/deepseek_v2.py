@@ -749,21 +749,30 @@ class DeepseekV2AttentionMLA(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         if self.q_lora_rank is not None:
+            # Wuxun: [N, hidden_dim] -> [N, q_lora_rank]
             q = self.q_a_proj(hidden_states)[0]
             q = self.q_a_layernorm(q)
+            # Wuxun: [N, q_lora_rank] -> [N, num_local_heads, qk_head_dim]
+            # q_b_proj/kv_b_proj is ColumnParallelLinear so num_heads splits
+            # into num_local_heads
             q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         else:
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
             )
+        # Wuxun: [N, num_heads, qk_head_dim] -> [N, num_heads, qk_nope_head_dim + qk_rope_head_dim]
         _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        # WUxun: [N, hidden_dim] -> [N, kv_lora_rank + qk_rope_head_dim]
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
         kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        # Wuxun: [N, kv_lora_rank + qk_rope_head_dim] -> [N, 1, kv_lora_rank + qk_rope_head_dim]
         latent_cache = latent_cache.unsqueeze(1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
+        # Wuxun: [N, kv_lora_rank] -> [N, num_local_heads, qk_nope_head_dim + v_head_dim]
         kv = self.kv_b_proj(kv_a)[0]
         kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope = kv[..., : self.qk_nope_head_dim]
+        # Wuxun: [N, num_local_heads, qk_nope_head_dim + v_head_dim] -> [N, num_local_heads, v_head_dim]
         v = kv[..., self.qk_nope_head_dim :]
         k_pe = latent_cache[:, :, self.kv_lora_rank :]
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
@@ -791,6 +800,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         q_len = hidden_states.shape[0]
+        # Wuxun: [N, num_local_heads, kv_lora_rank + qk_rope_head_dim]
         q_input = hidden_states.new_empty(
             q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
         )
@@ -818,20 +828,28 @@ class DeepseekV2AttentionMLA(nn.Module):
                 q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
             )
         else:
+            # Wuxun: [num_local_heads, N, qk_nope_head_dim] x [[num_local_heads, qk_nope_head_dim, kv_lora_rank]] -> [num_local_heads, N, kv_lora_rank]
             q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+        # Wuxun: [N, num_local_heads, kv_lora_rank]
         q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
 
+        # WUxun: [N, hidden_dim] -> [N, kv_lora_rank + qk_rope_head_dim]
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
         v_input = latent_cache[..., : self.kv_lora_rank]
+        # Wuxun: [N, kv_lora_rank] -> [N, 1, kv_lora_rank]
         v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
+        # Wuxun: [N, 1, kv_lora_rank + qk_rope_head_dim]
         k_input = latent_cache.unsqueeze(1)
         k_input[..., : self.kv_lora_rank] = v_input
         k_pe = k_input[..., self.kv_lora_rank :]
 
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        # Wuxun: [N, num_local_heads, kv_lora_rank + qk_rope_head_dim]
         q_input[..., self.kv_lora_rank :] = q_pe
+        # Wuxun: [N, 1, kv_lora_rank + qk_rope_head_dim]
         k_input[..., self.kv_lora_rank :] = k_pe
 
+        # Wuxun: multi-query attention
         attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
@@ -853,8 +871,12 @@ class DeepseekV2AttentionMLA(nn.Module):
                 torch.bfloat16,
             )
         else:
+            # Wuxun: [num_local_heads, N, kv_lora_rank] x [num_local_heads, kv_lora_rank, v_head_dim] -> [num_local_heads, N, v_head_dim]
             attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+            # Wuxun: [N, num_local_heads * v_head_dim]
         attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        # Wuxun: [N, num_local_heads * v_head_dim]x [num_local_heads, hidden_dim] -> [N, hidden_dim]
+        # allreduce required here
         output, _ = self.o_proj(attn_output)
 
         return output
@@ -869,17 +891,22 @@ class DeepseekV2AttentionMLA(nn.Module):
             os.getenv("SGLANG_FUSED_MLA_ENABLE_ROPE_FUSION", "1") == "1"
         )
         q_len = hidden_states.shape[0]
+        # Wuxun: [N, num_local_heads, kv_lora_rank + qk_rope_head_dim]
         q_input = hidden_states.new_empty(
             q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
         )
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
             q = self.q_a_layernorm(q)
+            # Wuxun: [N, num_local_heads, qk_head_dim]
             q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         else:
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
             )
+        # Wuxun: [N, num_local_heads, qk_head_dim] -> [N, num_local_heads, qk_nope_head_dim + qk_rope_head_dim]
+        # q_nope: [N, num_local_heads, qk_nope_head_dim]
+        # q_pe: [N, num_local_heads, qk_rope_head_dim]
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         if self.w_kc.dtype == torch.float8_e4m3fnuz:
@@ -896,6 +923,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
             )
         else:
+            # Wuxun: [N, num_local_heads, qk_nope_head_dim] -> [N, num_local_heads, kv_lora_rank]
             q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
         q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
 
@@ -1404,6 +1432,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                             0,
                         ).T
                 else:
+                    # Wuxun: [num_local_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]
                     w = self_attn.kv_b_proj.weight
                 # NOTE(HandH1998): Since `bmm_fp8` only supports per-tensor scale, we have to requantize `self_attn.kv_b_proj`.
                 # This may affect the accuracy of fp8 model.
@@ -1444,6 +1473,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                         w = w.to(torch.bfloat16) * self_attn.kv_b_proj.weight_scale.to(
                             torch.bfloat16
                         )
+                # Wuxun: [num_local_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank]
                 w_kc, w_vc = w.unflatten(
                     0, (-1, self_attn.qk_nope_head_dim + self_attn.v_head_dim)
                 ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
