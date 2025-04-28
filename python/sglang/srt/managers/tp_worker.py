@@ -175,12 +175,16 @@ class TpModelWorker:
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
         logits_output = self.model_runner.forward(forward_batch)
         if launch_done:
+            # Wuxun: immediately after cur batch's launch, start next batch's
+            # scheduling
             launch_done.set()
 
-        # Wuxun: skip sample here 
+        # Wuxun: skip sample here, for spec decode only, target worker to verify
+        # logits_output, no need for next token ids.
         if skip_sample:
             next_token_ids = None
         else:
+            # Wuxun: sampling on device, no CPU/GPU sync
             next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
 
         return logits_output, next_token_ids

@@ -622,6 +622,12 @@ class Scheduler(
         # cur batch's forward computation. Using queue to process batch output
         # in FCFS manner.
 
+        # Wuxun:
+        # GPU:                forward 0             -> D2D copy next token ids                               -> forward 1
+        # CPU:  schedule 0 ->   wait next token id -> get next token ids -> schedule 1 -> wait next token id
+        #                                             and copy to input                                      |
+        #                                             ids of next batch                                CPU/GPU sync here
+
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -666,18 +672,23 @@ class Scheduler(
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
+            # Wuxun: put new prefill req into waiting queue
             self.waiting_queue.extend(
                 self.disagg_prefill_pending_queue.pop_bootstrapped()
             )
+
+            # Wuxun: send kv cache chunks to decode servers
             self.process_prefill_chunk()
             batch = self.get_new_batch_prefill()
             self.cur_batch = batch
 
             if batch:
                 result = self.run_batch(batch)
+                # Wuxun: start sending kv chunks to decode server
                 self.process_batch_result_disagg_prefill(batch, result)
 
             if len(self.disagg_prefill_infight_queue) > 0:
+                # Wuxun: return output tokens if done transfer
                 self.process_disagg_prefill_infight_queue()
 
             if batch is None and len(self.disagg_prefill_infight_queue) == 0:
@@ -959,12 +970,15 @@ class Scheduler(
 
     def _add_request_to_queue(self, req: Req):
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            # Wuxun: add req to pending queue for prefill to allow initialization
+            # of sendera nd kv cache manager
             self.disagg_prefill_pending_queue.add(req)
 
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             self.disagg_decode_prealloc_queue.add(req)
 
         else:
+            # Wuxun: add req to waiting queue for prefill or chunked prefill
             self.waiting_queue.append(req)
 
     def _extend_requests_to_queue(self, reqs: List[Req], is_retracted: bool = False):
@@ -1472,6 +1486,7 @@ class Scheduler(
                 if batch.next_batch_sampling_info:
                     batch.next_batch_sampling_info.update_regex_vocab_mask()
                     self.current_stream.synchronize()
+                    # Wuxun: unblock next batch to do sampling
                     batch.next_batch_sampling_info.sampling_info_done.set()
         elif batch.forward_mode.is_dummy_first():
             batch.next_batch_sampling_info.update_regex_vocab_mask()

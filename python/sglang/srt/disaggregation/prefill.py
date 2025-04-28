@@ -121,6 +121,7 @@ class PrefillBootstrapQueue:
         if len(self.queue) == 0:
             return []
 
+        # Wuxun: check if kv senders are ready
         polls = poll_and_all_reduce(
             [req.disagg_kv_sender for req in self.queue], self.gloo_group
         )
@@ -131,11 +132,15 @@ class PrefillBootstrapQueue:
             elif poll == KVPoll.Failed:
                 raise Exception("Bootstrap failed")
 
+            # Wuxun: here poll states will be either:
+            #  - WaitingForInput 2
+
             # KV.WaitingForInput - init here
             num_kv_indices = len(req.origin_input_ids)
             if self.req_to_metadata_buffer_idx_allocator.available_size() == 0:
                 break
 
+            # Wuxun: allocate a metadata buffer for the request
             req.metadata_buffer_index = (
                 self.req_to_metadata_buffer_idx_allocator.alloc()
             )
@@ -170,10 +175,12 @@ class SchedulerDisaggregationPrefillMixin:
         for req, next_token_id in zip(batch.reqs, next_token_ids, strict=True):
             req: Req
             if req.is_chunked <= 0:
+                # Wuxun: chunked prefill finished
                 # There is no output_ids for prefill
                 req.output_ids.append(next_token_id)
                 self.tree_cache.cache_unfinished_req(req)  # update the tree and lock
                 self.send_kv_chunk(req, token_id=next_token_id)
+                # Wuxun: add the request to infight queue
                 self.disagg_prefill_infight_queue.append(req)
             else:
                 # being chunked reqs' prefill is not finished

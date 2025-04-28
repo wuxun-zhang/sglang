@@ -178,6 +178,7 @@ class DecodePreallocQueue:
                 break
 
             allocatable_tokens -= required_tokens_for_request
+            # Wuxun: prealloc KV for each request
             self._pre_alloc(decode_req.req)
 
             kv_indices = (
@@ -232,6 +233,7 @@ class DecodePreallocQueue:
         assert req_pool_indices is not None
 
         req.req_pool_idx = req_pool_indices[0]
+        # Wuxun: allocate kv pool for all tokens for each request
         kv_loc = self.token_to_kv_pool_allocator.alloc(
             len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
         )
@@ -273,6 +275,7 @@ class DecodeTransferQueue:
         if not self.queue:
             return []
 
+        # Wuxun: check KV receiver's states
         polls = poll_and_all_reduce(
             [decode_req.kv_receiver for decode_req in self.queue], self.gloo_group
         )
@@ -492,4 +495,5 @@ class SchedulerDisaggregationDecodeMixin:
         alloc_reqs = (
             self.disagg_decode_transfer_queue.pop_transferred()
         )  # the requests which kv has arrived
+        # Wuxun: add transfered req into waiting queue
         self.waiting_queue.extend(alloc_reqs)

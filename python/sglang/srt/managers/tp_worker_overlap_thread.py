@@ -133,11 +133,13 @@ class TpModelWorkerClient:
             batch_pt += 1
 
             # Create event
+            # Wuxun: this event is used to sync the model forward and copy
             self.launch_done = threading.Event()
             copy_done = torch.get_device_module(self.device).Event()
 
             # Resolve future tokens in the input
             input_ids = model_worker_batch.input_ids
+            # Wuxun: replace future token ids with real token ids
             resolve_future_token_ids(input_ids, self.future_token_ids_map)
 
             # Run forward
@@ -147,11 +149,16 @@ class TpModelWorkerClient:
 
             # Update the future token ids map
             bs = len(model_worker_batch.seq_lens)
+            # Wuxun: here trigger D2D copy from real next_token_ids to future_token_ids_map
+            # this maintains a stream execution: cur batch's forward -> D2D copy next token ids -> next batch's forward
             self.future_token_ids_map[
                 future_token_ids_ct + 1 : future_token_ids_ct + bs + 1
             ] = next_token_ids
 
             # Copy results to the CPU
+            # Wuxun: non-blocking copy to CPU
+            # This D2H copy is for streaming generated output tokens, not for
+            # next step's model forward.
             if model_worker_batch.return_logprob:
                 logits_output.next_token_logprobs = (
                     logits_output.next_token_logprobs.to("cpu", non_blocking=True)
@@ -173,7 +180,14 @@ class TpModelWorkerClient:
         # Wuxun: get real token ids here, this will sync GPU execution with
         # cpu processing
         copy_done, logits_output, next_token_ids = self.output_queue.get()
+        # Wuxun: copy_done is for next_token_ids copied to cpu (cpu/gpu non-blocking sync)
+        # this is for last batch's sampling
         copy_done.synchronize()
+        # Wuxun: wait until last batch's model runner forward finished, but not including
+        # sampling, means at this time next_token_ids may be still not ready yet.
+        # this is for current batch's model runner forward
+        # This is also to make sure CPU will not execute too earlier than GPU
+        # execution, usually 1 step ahead.
         self.launch_done.wait()
 
         if logits_output.next_token_logprobs is not None:

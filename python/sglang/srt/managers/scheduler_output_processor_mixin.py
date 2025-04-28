@@ -187,11 +187,12 @@ class SchedulerOutputProcessorMixin:
         self.num_generated_tokens += len(batch.reqs)
 
         if self.enable_overlap:
+            # Wuxun: get real next token ids here, this will sync GPU execution
             logits_output, next_token_ids = self.tp_worker.resolve_batch_result(bid)
             next_token_logprobs = logits_output.next_token_logprobs
         elif batch.spec_algorithm.is_none():
             # spec decoding handles output logprobs inside verify process.
-            # Wuxun: tolist triggers CPU/GPU sync
+            # Wuxun: before tolist, next_token_ids is already in CPU
             next_token_ids = next_token_ids.tolist()
             if batch.return_logprob:
                 next_token_logprobs = logits_output.next_token_logprobs.tolist()

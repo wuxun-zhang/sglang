@@ -343,6 +343,8 @@ class FlashAttentionBackend(AttentionBackend):
                 for idx, single_seq_len in enumerate(seq_lens_with_decode):
                     real_bsz_start_idx = idx
                     real_bsz_end_idx = idx + 1
+                    # Wuxun: initialize page table for indexing KV cache for
+                    # each token
                     metadata.page_table[
                         real_bsz_start_idx:real_bsz_end_idx,
                         (single_seq_len - (self.step_id + 1)) : single_seq_len,
