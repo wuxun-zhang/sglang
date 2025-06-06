@@ -58,7 +58,9 @@ __device__ void moe_fused_gate_impl(
     int64_t topk_group,
     int64_t topk,
     Params params) {
+  // Wuxun: thread index
   int tidx = threadIdx.x;
+  // WUxun: current process row/token index
   int64_t thread_row =
       blockIdx.x * params.ROWS_PER_CTA + threadIdx.y * params.ROWS_PER_WARP + tidx / params.THREADS_PER_ROW;
   if (thread_row >= num_rows) {
@@ -66,10 +68,14 @@ __device__ void moe_fused_gate_impl(
   }
 
   // Cast pointers to type T:
+  // wuxun: [num_tokens, num_experts]
   auto* input_ptr = reinterpret_cast<T*>(input);
+  // wuxun: size [num_experts]
   auto* bias_ptr = reinterpret_cast<T*>(bias);
+  // wuxun: starting pointer for each row
   auto* thread_row_ptr = input_ptr + thread_row * params.NUM_EXPERTS;
 
+  // wuxun: current processed expert group index
   int thread_group_idx = tidx % params.THREADS_PER_ROW;
   int first_elt_read_by_thread = thread_group_idx * params.VPT;
 
@@ -89,6 +95,7 @@ __device__ void moe_fused_gate_impl(
 // row_chunk_vec_ptr[0] = vec_thread_read_ptr[0];
 #pragma unroll
   for (int ii = 0; ii < params.VPT; ++ii) {
+    // wuxun: each thread read all values in its owning expert group
     row_chunk[ii] = vec_thread_read_ptr[0][ii];
     bias_chunk[ii] = vec_bias_thread_read_ptr[0][ii];
   }
@@ -105,6 +112,7 @@ __device__ void moe_fused_gate_impl(
 ////////////////////// Add Bias //////////////////////
 #pragma unroll
   for (int ii = 0; ii < params.VPT; ++ii) {
+    // wuxun: add bias to corresponding expert group
     bias_chunk[ii] = row_chunk[ii] + bias_chunk[ii];
   }
 
@@ -120,6 +128,7 @@ __device__ void moe_fused_gate_impl(
     for (int ii = 0; ii < params.VPT; ++ii) {
       T val = bias_chunk[ii];
 
+      // wuxun: find top2 values
       if (cmp_gt(val, max_val)) {
         max_val_second = max_val;
         max_val = val;
@@ -130,7 +139,15 @@ __device__ void moe_fused_gate_impl(
 
     // QQ NOTE: currently fixed to pick top2 sigmoid weight value in each expert group and sum them as the group weight
     // to select expert groups
+    // wuxun: got sum of top2 values for each expert group
     T max_sum = max_val + max_val_second;
+
+    // wuxun: after THREADS_PER_ROW - topk_group rounds, using argmin to find
+    // all expert ids with smaller max_sum and then also mark those values as
+    // FLT_MAX to exclude them in the next topk selection.
+    //
+    // Difference from using argmax, it can reduce extra num of rounds to mark
+    // all unselected expert values to FLT_MAX.
 
 // argmin reduce
 #pragma unroll
@@ -146,6 +163,8 @@ __device__ void moe_fused_gate_impl(
       }
     }
 
+    // wuxun: after warp shuffle, got expert id having smaller max_sum 
+
     // clear the max value in the thread
     if (k_idx < params.THREADS_PER_ROW - topk_group) {
       int const thread_to_clear_in_group = expert / params.VPT;
@@ -153,6 +172,8 @@ __device__ void moe_fused_gate_impl(
       if (thread_group_idx == thread_to_clear_in_group) {
 #pragma unroll
         for (int ii = 0; ii < params.VPT; ++ii) {
+          // wuxun: should be -FLT_MAX, but here using argmin, so this is a
+          // temporary value.
           bias_chunk[ii] = static_cast<T>(FLT_MAX);
         }
       }
@@ -163,25 +184,31 @@ __device__ void moe_fused_gate_impl(
 
   ////////////////////// Topk //////////////////////
   float output_sum = 0.0f;
+  // wuxun: each thread will run topK loops to find topK values for each row
   for (int k_idx = 0; k_idx < topk; ++k_idx) {
-    // local argmax
+    // local argmax to each expert group
     T max_val = bias_chunk[0];
     int expert = first_elt_read_by_thread;
 
     if (!cmp_eq(max_val, static_cast<T>(FLT_MAX))) {
+      // wuxun: find max_value and idx for each expert group
 #pragma unroll
       for (int ii = 1; ii < params.VPT; ++ii) {
         T val = bias_chunk[ii];
         if (cmp_gt(val, max_val)) {
           max_val = val;
+          // wuxun: global expert id
           expert = first_elt_read_by_thread + ii;
         }
       }
     } else {
+      // wuxun: now reset those masked-out values to -FLT_MAX
+      // all values in this expert group will be masked out
       max_val = static_cast<T>(-FLT_MAX);
     }
 
 // argmax reduce
+// wuxun: reduce accross threads/expert groups
 #pragma unroll
     for (int mask = params.THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
       T other_max =
@@ -196,6 +223,7 @@ __device__ void moe_fused_gate_impl(
     }
 
     if (k_idx < topk) {
+      // wuxun: find max_value and global expert id
       int thread_to_clear_in_group = expert / params.VPT;
       int64_t idx = topk * thread_row + k_idx;
 
@@ -206,6 +234,7 @@ __device__ void moe_fused_gate_impl(
         bias_chunk[expert_to_clear_in_thread] = static_cast<T>(-FLT_MAX);
 
         // store output
+        // wuxun: should use bias_chunk, right?
         output_ptr[idx] = static_cast<float>(row_chunk[expert_to_clear_in_thread]);
         indices_ptr[idx] = static_cast<int32_t>(expert);
       }
@@ -320,18 +349,26 @@ __global__ void moe_fused_gate_kernel_dynamic(
 //------------------------------------------------------------------------------
 std::vector<at::Tensor>
 moe_fused_gate(at::Tensor& input, at::Tensor& bias, int64_t num_expert_group, int64_t topk_group, int64_t topk) {
+  // Wuxun: num tokens
   int64_t num_rows = input.size(0);
   int32_t num_experts = input.size(1);
   auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+  // Wuxun: topk_weights and topk_indices
   auto output = torch::empty({num_rows, topk}, options);
   auto indices = torch::empty({num_rows, topk}, options.dtype(torch::kInt32));
 
   // Compute grid dimensions based on runtime value for num_expert_group.
+  // Wuxun: num tokens processed by a warp (32 threads)
+  // num_expert_group == num_threads_per_row
   int64_t rows_per_warp = std::max<int64_t>(1, WARP_SIZE / num_expert_group);
   int64_t num_warps = (num_rows + rows_per_warp - 1) / rows_per_warp;
   int64_t num_blocks = (num_warps + WARPS_PER_CTA - 1) / WARPS_PER_CTA;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   dim3 block_dim(WARP_SIZE, WARPS_PER_CTA);
+
+  // wuxun: each row/all expert group is processed by a warp, this can avoid
+  // cross warp communication which requires shared memory. Instead, each warp
+  // can communicate its calculated values using warp shuffle mechnism.
 
   // Check 1: Ensure that num_experts is a power of 2.
   TORCH_CHECK((num_experts & (num_experts - 1)) == 0, "num_experts must be a power of 2, but got ", num_experts);
@@ -344,6 +381,8 @@ moe_fused_gate(at::Tensor& input, at::Tensor& bias, int64_t num_expert_group, in
       " / ",
       num_expert_group);
 
+  // WUxun: Compute VPT (Value Per Thread) based on num_experts and num_expert_group.
+  // each thread handle a group of experts
   int computed_vpt = num_experts / num_expert_group;
   // Check 3: Ensure that num_experts/num_expert_group does not exceed MAX_VPT=32. Maximum VPT indicate max value per
   // threads we can process.

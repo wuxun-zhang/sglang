@@ -161,29 +161,40 @@ def biased_grouped_topk_impl(
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
+    # Wuxun: [num_tokens, num_total_experts]
     scores = gating_output.sigmoid()
     num_token = scores.shape[0]
     num_experts = scores.shape[1]
     scores_for_choice = scores.view(num_token, -1) + correction_bias.unsqueeze(0)
+    # Wuxun: first reshape to [num_tokens, num_expert_group, num_experts // num_expert_group]
+    # second select top 2 scores in each group
+    # finally sum up scores for each group
     group_scores = (
         scores_for_choice.view(num_token, num_expert_group, -1)
         .topk(2, dim=-1)[0]
         .sum(dim=-1)
     )  # [n, n_group]
+    # Wuxun: in each group, index of topk_group scores
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[
         1
     ]  # [n, top_k_group]
     group_mask = torch.zeros_like(group_scores)  # [n, n_group]
+    # Wuxun: mask positions whose scores are selected by topK
     group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
+    # Wuxun: extend group mask to score mask, those scores inside a masked-out
+    # group will be all masked out.
     score_mask = (
         group_mask.unsqueeze(-1)
         .expand(num_token, num_expert_group, scores.shape[-1] // num_expert_group)
         .reshape(num_token, -1)
     )  # [n, e]
+    # Wuxun: masked out scores that are not selected by topK_group
     tmp_scores = scores_for_choice.masked_fill(
         ~score_mask.bool(), float("-inf")
     )  # [n, e]
+    # Wuxun: then, topK to select final scores from selected groups
     _, topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)
+    # Wuxun: [num_tokens, topK]
     topk_weights = scores.gather(1, topk_ids)
 
     if n_share_experts_fusion:
