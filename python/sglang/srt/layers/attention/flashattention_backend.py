@@ -925,6 +925,7 @@ class FlashAttentionBackend(AttentionBackend):
                     :,
                     self.decode_cuda_graph_metadata["strided_indices"][:max_seq_pages],
                 ]
+                # Wuxun: update new page table for replay
                 page_indices = page_indices[req_pool_indices] // self.page_size
                 metadata.page_table[:, :max_seq_pages].copy_(page_indices)
                 metadata.page_table[:, max_seq_pages:].fill_(0)

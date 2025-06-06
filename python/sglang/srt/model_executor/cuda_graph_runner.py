@@ -105,6 +105,7 @@ def set_torch_compile_config():
 
     # FIXME: tmp workaround
     torch._dynamo.config.accumulated_cache_size_limit = 1024
+    # Wuxun: size limit for each cache entries of single guard to reduce recompilation
     if hasattr(torch._dynamo.config, "cache_size_limit"):
         torch._dynamo.config.cache_size_limit = 1024
 
@@ -113,6 +114,7 @@ def get_batch_sizes_to_capture(model_runner: ModelRunner):
     server_args = model_runner.server_args
     capture_bs = server_args.cuda_graph_bs
 
+    # Wuxun: these bs values are provided based on experiments, or experience?
     if capture_bs is None:
         if server_args.speculative_algorithm is None:
             if server_args.disable_cuda_graph_padding:
@@ -188,6 +190,7 @@ class CudaGraphRunner:
         self.num_tokens_per_bs = 1
         if model_runner.spec_algorithm.is_eagle():
             if self.model_runner.is_draft_worker:
+                # WUxun: draft will not use cuda graph
                 raise RuntimeError("This should not happen")
             else:
                 self.capture_forward_mode = ForwardMode.TARGET_VERIFY
@@ -198,6 +201,8 @@ class CudaGraphRunner:
         # Attention backend
         self.max_bs = max(self.capture_bs)
         self.max_num_token = self.max_bs * self.num_tokens_per_bs
+        # Wuxun: init cuda graph states per attention backen, reuse created tensors
+        # during graph replay
         self.model_runner.attn_backend.init_cuda_graph_state(self.max_num_token)
         self.seq_len_fill_value = (
             self.model_runner.attn_backend.get_cuda_graph_seq_len_fill_value()
@@ -212,6 +217,7 @@ class CudaGraphRunner:
             set_torch_compile_config()
 
         # Graph inputs
+        # Wuxun: create gpu tensors which will be reused for whole graph replays
         with torch.device("cuda"):
             self.input_ids = torch.zeros((self.max_num_token,), dtype=torch.int64)
             self.req_pool_indices = torch.zeros((self.max_bs,), dtype=torch.int32)
@@ -323,6 +329,8 @@ class CudaGraphRunner:
                 self.model_runner.device, self.model_runner.gpu_id, empty_cache=False
             )
             # Reverse the order to enable better memory sharing across cuda graphs.
+            # Wuxun: memory sharing between cuda graphs, the larger bs is captured
+            # first
             capture_range = (
                 tqdm.tqdm(list(reversed(self.capture_bs)))
                 if get_tensor_model_parallel_rank() == 0
@@ -350,6 +358,7 @@ class CudaGraphRunner:
                         output_buffers,
                     ) = self.capture_one_batch_size(bs, forward)
                     self.graphs[bs] = graph
+                    # Wuxun: static output buffers
                     self.output_buffers[bs] = output_buffers
 
                 # Save gemlite cache after each capture
@@ -358,6 +367,7 @@ class CudaGraphRunner:
     def capture_one_batch_size(self, bs: int, forward: Callable):
         graph = torch.cuda.CUDAGraph()
         stream = self.stream
+        # Wuxun: total tokens for all dp ranks
         num_tokens = bs * self.num_tokens_per_bs
 
         # Graph inputs
@@ -365,6 +375,7 @@ class CudaGraphRunner:
         req_pool_indices = self.req_pool_indices[:bs]
         seq_lens = self.seq_lens[:bs]
         out_cache_loc = self.out_cache_loc[:num_tokens]
+        # Wuxun: poinitions for all batched tokens
         positions = self.positions[:num_tokens]
         if self.is_encoder_decoder:
             encoder_lens = self.encoder_lens[:bs]
@@ -373,6 +384,8 @@ class CudaGraphRunner:
         mrope_positions = self.mrope_positions[:, :bs]
 
         if self.enable_dp_attention or self.enable_sp_layernorm:
+            # Wuxun: if dp attention, then each dp rank got part of tokens, here
+            # to collect global num tokens to simulate real scenario
             self.global_num_tokens_gpu.copy_(
                 torch.tensor(
                     [
@@ -436,6 +449,8 @@ class CudaGraphRunner:
             logits_output = forward(input_ids, forward_batch.positions, forward_batch)
             return logits_output.next_token_logits, logits_output.hidden_states
 
+        # Wuxun: warmup runs before graph capturing to avoid including kernel
+        # launch for benchmarking (Triton autotune)
         for _ in range(2):
             torch.cuda.synchronize()
             self.model_runner.tp_group.barrier()
@@ -446,6 +461,8 @@ class CudaGraphRunner:
         with torch.cuda.graph(graph, pool=global_graph_memory_pool, stream=stream):
             out = run_once()
 
+        # Wuxun: return memory pool id for created cuda graph
+        # reuse global memory pool accross all cuda graph runners
         global_graph_memory_pool = graph.pool()
         return graph, out
 
@@ -482,6 +499,7 @@ class CudaGraphRunner:
             index = bisect.bisect_left(self.capture_bs, raw_bs)
         bs = self.capture_bs[index]
         if bs != raw_bs:
+            # Wuxun: what for???
             self.seq_lens.fill_(1)
             self.out_cache_loc.zero_()
 
@@ -534,6 +552,7 @@ class CudaGraphRunner:
             self.positions[: self.raw_num_token].copy_(forward_batch.positions)
 
         # Replay
+        # Wuxun: choose the right graph to replay based on real bs
         self.graphs[self.bs].replay()
         next_token_logits, hidden_states = self.output_buffers[self.bs]
 

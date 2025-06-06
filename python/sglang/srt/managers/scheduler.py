@@ -1227,6 +1227,8 @@ class Scheduler(
                 ret = None
 
         # Handle DP attention
+        # Wuxun: collect global information for DP attention which will be used
+        # in later MLP/MOE computations.
         if self.server_args.enable_dp_attention or self.server_args.enable_sp_layernorm:
             ret, _ = self.prepare_dp_attn_batch(ret)
 
@@ -1523,6 +1525,7 @@ class Scheduler(
             )
 
         if local_batch is None or local_batch.forward_mode.is_decode_or_idle():
+            # WUxun: enable cuda graph for decode
             can_cuda_graph = 1
         else:
             can_cuda_graph = 0
@@ -1553,6 +1556,7 @@ class Scheduler(
             local_info,
             group=self.tp_cpu_group,
         )
+        # Wuxun: get the global num tokens for all dp ranks
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
         global_num_tokens_for_logprob = global_info[:, 0, 2].tolist()
